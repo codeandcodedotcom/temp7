@@ -27,7 +27,7 @@ def create_app():
 if __name__ == "__main__":
     app = create_app()
 
-    port = int(os.environ.get("PORT", 8080))
+    port = int(__import__("os").environ.get("PORT", 8080))
     # Enable debug only in dev environment
     debug_mode = app.config["ENVIRONMENT"].lower() == "dev"
 
