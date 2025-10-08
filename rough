@@ -1,0 +1,20 @@
+import os, requests
+from azure.identity import ClientSecretCredential
+
+# only edit the endpoint string below for now (use the portal-copied value)
+endpoint = "https://YOUR_ENDPOINT_FROM_PORTAL"
+
+# these env vars should already be set in your environment for the SP test
+tenant = os.getenv("AZURE_TENANT_ID")
+cid = os.getenv("AZURE_CLIENT_ID")
+secret = os.getenv("AZURE_CLIENT_SECRET")
+
+cred = ClientSecretCredential(tenant_id=tenant, client_id=cid, client_secret=secret)
+token = cred.get_token("https://cognitiveservices.azure.com/.default")
+
+url = endpoint.rstrip("/") + "/openai/deployments?api-version=2023-05-15"
+print("Request URL:", url)
+resp = requests.get(url, headers={"Authorization": f"Bearer {token.token}"}, timeout=8)
+print("STATUS:", resp.status_code)
+print("BODY (first 800 chars):")
+print(resp.text[:800])
