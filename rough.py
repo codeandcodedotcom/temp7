@@ -1,7 +1,11 @@
-# save as dump_jwt.py and run: python dump_jwt.py "<ACCESS_TOKEN>"
-import sys, base64, json
-tok = sys.argv[1]
-parts = tok.split('.')
-def dec(p): return json.loads(base64.urlsafe_b64decode(p + '=' * (-len(p)%4)).decode())
-print("HEADER:", json.dumps(dec(parts[0]), indent=2))
-print("PAYLOAD:", json.dumps(dec(parts[1]), indent=2))
+# save as test_token.py and run: python test_token.py
+import requests, os
+TENANT="<TENANT_ID>"
+CID="<CLIENT_ID>"
+SECRET="<CLIENT_SECRET>"
+SCOPE="https://databricks.azure.net/.default"
+r = requests.post(f"https://login.microsoftonline.com/{TENANT}/oauth2/v2.0/token",
+                  data={"client_id":CID,"client_secret":SECRET,"grant_type":"client_credentials","scope":SCOPE},
+                  timeout=15)
+print("STATUS:", r.status_code)
+print("BODY:", r.text)
