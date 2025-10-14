@@ -1,9 +1,7 @@
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.serving import ServeEndpointRequest
-import os
 
 # ===== HARDCODED VALUES =====
-# Set these environment variables in your Databricks cluster or notebook
+# Set these with your actual values
 WORKSPACE_URL = "https://adb-<workspace-id>.azuredatabricks.net"  # Replace with your workspace URL
 CLIENT_ID = "your-client-id-here"                                  # Replace with Service Principal App ID
 CLIENT_SECRET = "your-client-secret-here"                          # Replace with Service Principal secret
@@ -30,11 +28,15 @@ print(f"Testing models: {MODELS}\n")
 
 for model in MODELS:
     try:
+        # Using get method directly on serving_endpoints
         endpoint = client.serving_endpoints.get(model)
         print(f"✓ {model}: Accessible")
         print(f"  Status: {endpoint.state}")
     except Exception as e:
-        if "404" in str(e) or "not found" in str(e).lower():
-            print(f"✗ {model}: Not found")
+        error_str = str(e).lower()
+        if "404" in str(e) or "not found" in error_str:
+            print(f"✗ {model}: Not found (404)")
+        elif "403" in str(e) or "forbidden" in error_str:
+            print(f"✗ {model}: Forbidden - No permission (403)")
         else:
-            print(f"✗ {model}: {str(e)}")
+            print(f"✗ {model}: Error - {str(e)}")
