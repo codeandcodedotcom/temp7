@@ -32,7 +32,14 @@ for model in MODELS:
                 ]
             )
             print(f"  ✓ Invocation successful")
-            print(f"  Response: {response.choices[0].message.content}")
+            # Handle different response formats
+            if hasattr(response, 'choices') and len(response.choices) > 0:
+                if hasattr(response.choices[0].message, 'content'):
+                    print(f"  Response: {response.choices[0].message.content}")
+                else:
+                    print(f"  Response: {response.choices[0].message}")
+            else:
+                print(f"  Response: {response}")
         except Exception as invoke_error:
             print(f"  ✗ Invocation failed: {str(invoke_error)}")
         
