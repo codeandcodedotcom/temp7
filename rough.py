@@ -22,6 +22,21 @@ for model in MODELS:
         endpoint = client.serving_endpoints.get(model)
         print(f"✓ {model}: Accessible")
         print(f"  Status: {endpoint.state}")
+        
+        # ===== Test Model Invocation with a prompt =====
+        try:
+            response = client.serving_endpoints.query(
+                name=model,
+                messages=[
+                    {"role": "user", "content": "What is the capital of France? Answer in one sentence."}
+                ]
+            )
+            print(f"  ✓ Invocation successful")
+            print(f"  Response: {response.choices[0].message.content}")
+        except Exception as invoke_error:
+            print(f"  ✗ Invocation failed: {str(invoke_error)}")
+        
+        print()
     except Exception as e:
         error_str = str(e).lower()
         if "404" in str(e) or "not found" in error_str:
@@ -30,3 +45,4 @@ for model in MODELS:
             print(f"✗ {model}: Forbidden - No permission (403)")
         else:
             print(f"✗ {model}: Error - {str(e)}")
+        print()
