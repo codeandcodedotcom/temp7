@@ -1,23 +1,14 @@
 from databricks.sdk import WorkspaceClient
 
 # ===== HARDCODED VALUES =====
-# Set these with your actual values
 WORKSPACE_URL = "https://adb-<workspace-id>.azuredatabricks.net"  # Replace with your workspace URL
-CLIENT_ID = "your-client-id-here"                                  # Replace with Service Principal App ID
-CLIENT_SECRET = "your-client-secret-here"                          # Replace with Service Principal secret
-TENANT_ID = "your-tenant-id-here"                                  # Replace with Azure Tenant ID
 
 # Models to test
 MODELS = ["gpt-4-1-mini", "gpt-4-1", "gpt-4o"]
 
-# ===== Initialize Databricks Client using Service Principal =====
+# ===== Initialize Databricks Client using cluster's built-in auth =====
 try:
-    client = WorkspaceClient(
-        host=WORKSPACE_URL,
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        azure_tenant_id=TENANT_ID
-    )
+    client = WorkspaceClient(host=WORKSPACE_URL)
     print("✓ Databricks authentication successful\n")
 except Exception as e:
     print(f"✗ Authentication failed: {str(e)}")
@@ -28,7 +19,6 @@ print(f"Testing models: {MODELS}\n")
 
 for model in MODELS:
     try:
-        # Using get method directly on serving_endpoints
         endpoint = client.serving_endpoints.get(model)
         print(f"✓ {model}: Accessible")
         print(f"  Status: {endpoint.state}")
