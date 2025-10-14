@@ -1,77 +1,76 @@
-from databricks.sdk import WorkspaceClient
 import requests
 import json
 
-# ===== HARDCODED VALUES =====
+# ===== HARDCODED VALUES - Replace with your actual values =====
 WORKSPACE_URL = "https://adb-<workspace-id>.azuredatabricks.net"  # Replace with your workspace URL
+CLIENT_ID = "your-client-id-here"                                  # Replace with your Service Principal App ID
+CLIENT_SECRET = "your-client-secret-here"                          # Replace with your Service Principal secret
+TENANT_ID = "your-tenant-id-here"                                  # Replace with your Azure Tenant ID
 
 # Models to test
-MODELS = ["gpt41mini", "gpt-41", "gpt-4o"]
+MODELS = ["gpt-4-1-mini", "gpt-4-1", "gpt-4o"]
 
-# ===== Initialize Databricks Client using cluster's built-in auth =====
-try:
-    client = WorkspaceClient(host=WORKSPACE_URL)
-    print("✓ Databricks authentication successful\n")
-except Exception as e:
-    print(f"✗ Authentication failed: {str(e)}")
+# ===== STEP 1: Get Azure Token =====
+print("Getting Azure token...")
+token_url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+token_data = {
+    "client_id": CLIENT_ID,
+    "client_secret": CLIENT_SECRET,
+    "scope": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default",
+    "grant_type": "client_credentials"
+}
+
+token_response = requests.post(token_url, data=token_data)
+if token_response.status_code != 200:
+    print(f"✗ Failed to get token: {token_response.text}")
     exit()
 
-# Get auth token from client
-try:
-    token = client.auth.token()
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-except:
-    print("Warning: Could not retrieve token for API calls")
-    headers = {}
+access_token = token_response.json()["access_token"]
+print("✓ Azure authentication successful\n")
 
-# ===== Test Model Accessibility =====
+# ===== STEP 2: Test Model Accessibility =====
 print(f"Testing models: {MODELS}\n")
 
+headers = {
+    "Authorization": f"Bearer {access_token}",
+    "Content-Type": "application/json"
+}
+
 for model in MODELS:
-    try:
-        endpoint = client.serving_endpoints.get(model)
+    # Test 1: Check if endpoint exists
+    url = f"{WORKSPACE_URL}/api/2.0/serving-endpoints/{model}"
+    response = requests.get(url, headers=headers)
+    
+    if response.status_code == 200:
         print(f"✓ {model}: Accessible")
-        print(f"  Status: {endpoint.state}")
+        endpoint_data = response.json()
+        print(f"  Status: {endpoint_data.get('state', 'Unknown')}")
         
-        # ===== Test Model Invocation with a prompt using raw HTTP =====
-        try:
-            url = f"{WORKSPACE_URL}/serving-endpoints/{model}/invocations"
-            payload = {
-                "messages": [
-                    {"role": "user", "content": "What is the capital of France? Answer in one sentence."}
-                ]
-            }
-            
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                result = response.json()
-                print(f"  ✓ Invocation successful")
-                # Extract response text
-                if "choices" in result and len(result["choices"]) > 0:
-                    if "message" in result["choices"][0]:
-                        print(f"  Response: {result['choices'][0]['message']}")
-                    elif "text" in result["choices"][0]:
-                        print(f"  Response: {result['choices'][0]['text']}")
-                else:
-                    print(f"  Response: {result}")
+        # Test 2: Try to invoke the model
+        invoke_url = f"{WORKSPACE_URL}/serving-endpoints/{model}/invocations"
+        payload = {
+            "messages": [
+                {"role": "user", "content": "What is the capital of France? Answer in one sentence."}
+            ]
+        }
+        
+        invoke_response = requests.post(invoke_url, json=payload, headers=headers, timeout=30)
+        
+        if invoke_response.status_code == 200:
+            result = invoke_response.json()
+            print(f"  ✓ Invocation successful")
+            if "choices" in result and len(result["choices"]) > 0:
+                if "message" in result["choices"][0]:
+                    print(f"  Response: {result['choices'][0]['message']}")
+                elif "text" in result["choices"][0]:
+                    print(f"  Response: {result['choices'][0]['text']}")
             else:
-                print(f"  ✗ Invocation failed: HTTP {response.status_code}")
-                print(f"  Error: {response.text}")
-                
-        except Exception as invoke_error:
-            print(f"  ✗ Invocation failed: {str(invoke_error)}")
-        
-        print()
-    except Exception as e:
-        error_str = str(e).lower()
-        if "404" in str(e) or "not found" in error_str:
-            print(f"✗ {model}: Not found (404)")
-        elif "403" in str(e) or "forbidden" in error_str:
-            print(f"✗ {model}: Forbidden - No permission (403)")
+                print(f"  Response: {result}")
         else:
-            print(f"✗ {model}: Error - {str(e)}")
-        print()
+            print(f"  ✗ Invocation failed: HTTP {invoke_response.status_code}")
+            print(f"  Error: {invoke_response.text}")
+    else:
+        print(f"✗ {model}: HTTP {response.status_code}")
+        print(f"  Error: {response.text}")
+    
+    print()
