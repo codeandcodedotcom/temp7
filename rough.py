@@ -1,10 +1,12 @@
 from databricks.sdk import WorkspaceClient
+import requests
+import json
 
 # ===== HARDCODED VALUES =====
 WORKSPACE_URL = "https://adb-<workspace-id>.azuredatabricks.net"  # Replace with your workspace URL
 
 # Models to test
-MODELS = ["gpt-4-1-mini", "gpt-4-1", "gpt-4o"]
+MODELS = ["gpt41mini", "gpt-41", "gpt-4o"]
 
 # ===== Initialize Databricks Client using cluster's built-in auth =====
 try:
@@ -13,6 +15,17 @@ try:
 except Exception as e:
     print(f"✗ Authentication failed: {str(e)}")
     exit()
+
+# Get auth token from client
+try:
+    token = client.auth.token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+except:
+    print("Warning: Could not retrieve token for API calls")
+    headers = {}
 
 # ===== Test Model Accessibility =====
 print(f"Testing models: {MODELS}\n")
@@ -23,23 +36,32 @@ for model in MODELS:
         print(f"✓ {model}: Accessible")
         print(f"  Status: {endpoint.state}")
         
-        # ===== Test Model Invocation with a prompt =====
+        # ===== Test Model Invocation with a prompt using raw HTTP =====
         try:
-            response = client.serving_endpoints.query(
-                name=model,
-                messages=[
+            url = f"{WORKSPACE_URL}/serving-endpoints/{model}/invocations"
+            payload = {
+                "messages": [
                     {"role": "user", "content": "What is the capital of France? Answer in one sentence."}
                 ]
-            )
-            print(f"  ✓ Invocation successful")
-            # Handle different response formats
-            if hasattr(response, 'choices') and len(response.choices) > 0:
-                if hasattr(response.choices[0].message, 'content'):
-                    print(f"  Response: {response.choices[0].message.content}")
+            }
+            
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"  ✓ Invocation successful")
+                # Extract response text
+                if "choices" in result and len(result["choices"]) > 0:
+                    if "message" in result["choices"][0]:
+                        print(f"  Response: {result['choices'][0]['message']}")
+                    elif "text" in result["choices"][0]:
+                        print(f"  Response: {result['choices'][0]['text']}")
                 else:
-                    print(f"  Response: {response.choices[0].message}")
+                    print(f"  Response: {result}")
             else:
-                print(f"  Response: {response}")
+                print(f"  ✗ Invocation failed: HTTP {response.status_code}")
+                print(f"  Error: {response.text}")
+                
         except Exception as invoke_error:
             print(f"  ✗ Invocation failed: {str(invoke_error)}")
         
