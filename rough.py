@@ -1,76 +1,97 @@
-import requests
-import json
+# utils/db_utils.py  (extract)
+import os
+import logging
 
-# ===== HARDCODED VALUES - Replace with your actual values =====
-WORKSPACE_URL = "https://adb-<workspace-id>.azuredatabricks.net"  # Replace with your workspace URL
-CLIENT_ID = "your-client-id-here"                                  # Replace with your Service Principal App ID
-CLIENT_SECRET = "your-client-secret-here"                          # Replace with your Service Principal secret
-TENANT_ID = "your-tenant-id-here"                                  # Replace with your Azure Tenant ID
+try:
+    import psycopg2
+except Exception:
+    psycopg2 = None
 
-# Models to test
-MODELS = ["gpt-4-1-mini", "gpt-4-1", "gpt-4o"]
+try:
+    from azure.identity import ClientSecretCredential
+except Exception:
+    ClientSecretCredential = None
 
-# ===== STEP 1: Get Azure Token =====
-print("Getting Azure token...")
-token_url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
-token_data = {
-    "client_id": CLIENT_ID,
-    "client_secret": CLIENT_SECRET,
-    "scope": "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default",
-    "grant_type": "client_credentials"
-}
 
-token_response = requests.post(token_url, data=token_data)
-if token_response.status_code != 200:
-    print(f"✗ Failed to get token: {token_response.text}")
-    exit()
+def check_postgres_sp(timeout: int = 3):
+    """
+    Connect to Azure Database for PostgreSQL using Service Principal (ClientSecretCredential).
+    Required env vars:
+      - AZURE_TENANT_ID
+      - AZURE_CLIENT_ID
+      - AZURE_CLIENT_SECRET
+      - DATABASE_HOST      (e.g. mydb.postgres.database.azure.com)
+      - DATABASE_NAME      (e.g. postgres)
+      - DATABASE_USER      (the DB user / AAD mapped user to authenticate as)
+    Optional:
+      - AZURE_RESOURCE     (default: https://ossrdbms-aad.database.windows.net)
+    Returns a dict (for JSONification by the route).
+    """
+    logger = logging.getLogger("db_utils")
 
-access_token = token_response.json()["access_token"]
-print("✓ Azure authentication successful\n")
+    if psycopg2 is None:
+        raise RuntimeError("psycopg2 is not installed")
 
-# ===== STEP 2: Test Model Accessibility =====
-print(f"Testing models: {MODELS}\n")
+    if ClientSecretCredential is None:
+        raise RuntimeError("azure-identity ClientSecretCredential not available; install azure-identity")
 
-headers = {
-    "Authorization": f"Bearer {access_token}",
-    "Content-Type": "application/json"
-}
+    tenant = os.getenv("AZURE_TENANT_ID")
+    client_id = os.getenv("AZURE_CLIENT_ID")
+    client_secret = os.getenv("AZURE_CLIENT_SECRET")
 
-for model in MODELS:
-    # Test 1: Check if endpoint exists
-    url = f"{WORKSPACE_URL}/api/2.0/serving-endpoints/{model}"
-    response = requests.get(url, headers=headers)
-    
-    if response.status_code == 200:
-        print(f"✓ {model}: Accessible")
-        endpoint_data = response.json()
-        print(f"  Status: {endpoint_data.get('state', 'Unknown')}")
-        
-        # Test 2: Try to invoke the model
-        invoke_url = f"{WORKSPACE_URL}/serving-endpoints/{model}/invocations"
-        payload = {
-            "messages": [
-                {"role": "user", "content": "What is the capital of France? Answer in one sentence."}
-            ]
-        }
-        
-        invoke_response = requests.post(invoke_url, json=payload, headers=headers, timeout=30)
-        
-        if invoke_response.status_code == 200:
-            result = invoke_response.json()
-            print(f"  ✓ Invocation successful")
-            if "choices" in result and len(result["choices"]) > 0:
-                if "message" in result["choices"][0]:
-                    print(f"  Response: {result['choices'][0]['message']}")
-                elif "text" in result["choices"][0]:
-                    print(f"  Response: {result['choices'][0]['text']}")
-            else:
-                print(f"  Response: {result}")
-        else:
-            print(f"  ✗ Invocation failed: HTTP {invoke_response.status_code}")
-            print(f"  Error: {invoke_response.text}")
-    else:
-        print(f"✗ {model}: HTTP {response.status_code}")
-        print(f"  Error: {response.text}")
-    
-    print()
+    host = os.getenv("DATABASE_HOST")
+    name = os.getenv("DATABASE_NAME", "postgres")
+    user = os.getenv("DATABASE_USER")
+
+    missing = [n for n, v in (
+        ("AZURE_TENANT_ID", tenant),
+        ("AZURE_CLIENT_ID", client_id),
+        ("AZURE_CLIENT_SECRET", client_secret),
+        ("DATABASE_HOST", host),
+        ("DATABASE_NAME", name),
+        ("DATABASE_USER", user),
+    ) if not v]
+
+    if missing:
+        raise ValueError(f"Missing environment variables required for SP DB auth: {', '.join(missing)}")
+
+    # resource / scope for Azure DB tokens (default for Azure DB for Postgres)
+    resource = os.getenv("AZURE_RESOURCE", "https://ossrdbms-aad.database.windows.net")
+    scope = resource.rstrip("/") + "/.default"
+
+    try:
+        cred = ClientSecretCredential(tenant_id=tenant, client_id=client_id, client_secret=client_secret)
+        token = cred.get_token(scope)
+        access_token = token.token
+    except Exception as ex:
+        logger.exception("Failed to acquire AAD token for Postgres")
+        return {"db": "unavailable", "error": "token_failure", "detail": str(ex)}
+
+    # connect using token as password (Azure AD auth)
+    try:
+        conn = psycopg2.connect(
+            host=host,
+            dbname=name,
+            user=user,
+            password=access_token,
+            sslmode="require",
+            connect_timeout=timeout
+        )
+    except Exception as ex:
+        logger.exception("Failed to open Postgres connection")
+        return {"db": "unavailable", "error": "connect_failure", "detail": str(ex)}
+
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1;")
+        val = cur.fetchone()[0]
+        cur.close()
+        return {"db": "ok", "mode": "service_principal", "result": val}
+    except Exception as ex:
+        logger.exception("Postgres query failed")
+        return {"db": "unavailable", "error": "query_failure", "detail": str(ex)}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
