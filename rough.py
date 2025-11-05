@@ -1,10 +1,10 @@
-# prefer new key "prerequisites" (list), fallback to old "pre_requisites"
-p_prereq = phase_val.get("prerequisites") or phase_val.get("pre_requisites")
-if p_prereq:
-    if isinstance(p_prereq, list):
-        timeline_html += "<p><strong>Pre-requisites:</strong></p><ul>"
-        for prereq in p_prereq:
-            timeline_html += f"<li>{esc(str(prereq))}</li>"
-        timeline_html += "</ul>"
-    else:
-        timeline_html += f"<p><strong>Pre-requisites:</strong> {esc(str(p_prereq))}</p>"
+# format phase title properly (e.g., "deployment_and_uat" → "Deployment and UAT")
+phase_name = str(phase_key).replace("_", " ")
+phase_name = phase_name.capitalize()  # only capitalize first letter
+# fix "Uat" → "UAT" and keep "and" lowercase
+phase_name = (
+    phase_name.replace(" And ", " and ")
+               .replace(" Uat", " UAT")
+               .replace(" Qa", " QA")
+)
+timeline_html += f"<h4>{esc(phase_name)}</h4>"
