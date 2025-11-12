@@ -38,9 +38,9 @@ def get_embedding(text):
         "Content-Type": "application/json"
     }
     
-    # Proper payload format for embedding models
+    # Correct payload format based on sister_v2_small model requirements
     payload = {
-        "input": str(text)
+        "inputs": [str(text)]  # Must be "inputs" (plural) with a list
     }
     
     try:
@@ -48,16 +48,12 @@ def get_embedding(text):
         response.raise_for_status()
         result = response.json()
         
-        # Extract embedding from response - common formats
-        if isinstance(result, dict):
-            if "data" in result and len(result["data"]) > 0:
-                return result["data"][0].get("embedding")
-            elif "embeddings" in result and len(result["embeddings"]) > 0:
-                return result["embeddings"][0]
-            elif "embedding" in result:
-                return result["embedding"]
-        elif isinstance(result, list):
-            return result
+        # Extract embedding from response - sister_v2_small returns "predictions"
+        if isinstance(result, dict) and "predictions" in result:
+            predictions = result["predictions"]
+            if isinstance(predictions, list) and len(predictions) > 0:
+                # Return the first prediction (embedding vector)
+                return predictions[0]
         
         print(f"Unexpected response format: {result}")
         return None
