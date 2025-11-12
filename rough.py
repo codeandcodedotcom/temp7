@@ -1,57 +1,106 @@
-# Define the catalog and schema
-catalog = "dsenprd"
-schema = "lit_prepare"
+from pyspark.sql import functions as F
+from pyspark.sql.types import ArrayType, FloatType
+import requests
+import json
 
-delta_table_1 = f"{catalog}.{schema}.prepare_historical_data"
-embedding_table_1 = f"{catalog}.{schema}.embedding_prepare_historical_data"
+# Configuration
+CATALOG = "dsenprod"
+SCHEMA = "lit_prepare"
+SOURCE_TABLE = "your_source_table_name"  # Replace with your actual table name
+TARGET_TABLE = "your_target_table_name"  # Replace with your desired target table name
+EMBEDDING_MODEL = "sister_v2_small"
 
-from databricks_langchain import DatabricksEmbeddings
-from pyspark.sql.types import StructType, StructField, StringType, ArrayType, FloatType, IntegerType, TimestampType
-import pandas as pd
+# Full table names
+source_table_full = f"{CATALOG}.{SCHEMA}.{SOURCE_TABLE}"
+target_table_full = f"{CATALOG}.{SCHEMA}.{TARGET_TABLE}"
 
-# Initialize the embedding model
-embeddings = DatabricksEmbeddings(endpoint="sister_v2_small")
+# Read the source table
+df = spark.table(source_table_full)
 
-# Load source table and convert to Pandas
-df = spark.table(delta_table_1)
-pdf = df.toPandas()
+print(f"Loaded {df.count()} rows from {source_table_full}")
 
-print(f"Processing {len(pdf)} rows...")
+# Get Databricks token and host for API calls
+token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+host = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiUrl().get()
 
-# Function to safely embed text
-def safe_embed(text):
-    if pd.isna(text) or text == "" or text is None:
+# Function to get embeddings from Databricks serving endpoint
+def get_embedding(text):
+    """
+    Get embedding for a single text string.
+    Returns a list of floats (the embedding vector).
+    """
+    if text is None or str(text).strip() == "":
         return None
+    
+    url = f"{host}/serving-endpoints/{EMBEDDING_MODEL}/invocations"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    
+    # Proper payload format for embedding models
+    payload = {
+        "input": str(text)
+    }
+    
     try:
-        result = embeddings.embed_query(str(text))
-        # Convert to list of floats to ensure proper format
-        return [float(x) for x in result]
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        
+        # Extract embedding from response - common formats
+        if isinstance(result, dict):
+            if "data" in result and len(result["data"]) > 0:
+                return result["data"][0].get("embedding")
+            elif "embeddings" in result and len(result["embeddings"]) > 0:
+                return result["embeddings"][0]
+            elif "embedding" in result:
+                return result["embedding"]
+        elif isinstance(result, list):
+            return result
+        
+        print(f"Unexpected response format: {result}")
+        return None
+        
     except Exception as e:
-        print(f"Error embedding text '{str(text)[:50]}...': {e}")
+        print(f"Error getting embedding: {str(e)}")
         return None
 
-# Generate embeddings for both columns
-pdf['finding_embedding'] = pdf['Finding'].apply(safe_embed)
-pdf['action_embedding'] = pdf['Action'].apply(safe_embed)
+# Register UDF with proper return type
+get_embedding_udf = F.udf(get_embedding, ArrayType(FloatType()))
 
-print("Embeddings generated. Converting back to Spark DataFrame...")
-
-# Get the original schema and add embedding columns
-original_schema = df.schema
-new_schema = StructType(
-    original_schema.fields + [
-        StructField("finding_embedding", ArrayType(FloatType()), True),
-        StructField("action_embedding", ArrayType(FloatType()), True)
-    ]
+# Add embedded columns
+# Cast text columns to string explicitly to avoid any type issues
+df_with_embeddings = df.withColumn(
+    "Finding_Embedding",
+    get_embedding_udf(F.col("Finding").cast("string"))
+).withColumn(
+    "Action_Embedding",
+    get_embedding_udf(F.col("Action").cast("string"))
 )
 
-# Convert back to Spark DataFrame with explicit schema
-df_with_embeddings = spark.createDataFrame(pdf, schema=new_schema)
+# Show sample to verify
+print("\nSample of embedded data:")
+df_with_embeddings.select("Id", "Finding", "Action").show(5, truncate=50)
 
-# Write the result to a new table
-df_with_embeddings.write.mode("overwrite").saveAsTable(embedding_table_1)
+# Check if embeddings were generated
+embedding_check = df_with_embeddings.select(
+    F.sum(F.when(F.col("Finding_Embedding").isNotNull(), 1).otherwise(0)).alias("finding_embeddings_count"),
+    F.sum(F.when(F.col("Action_Embedding").isNotNull(), 1).otherwise(0)).alias("action_embeddings_count")
+).collect()[0]
 
-print("Table saved successfully!")
+print(f"\nEmbeddings generated:")
+print(f"Finding embeddings: {embedding_check['finding_embeddings_count']}")
+print(f"Action embeddings: {embedding_check['action_embeddings_count']}")
 
-# Show the resulting DataFrame
-display(df_with_embeddings)
+# Write to target table
+print(f"\nWriting to {target_table_full}...")
+df_with_embeddings.write.mode("overwrite").saveAsTable(target_table_full)
+
+print(f"\nSuccess! Table {target_table_full} created with {df_with_embeddings.count()} rows.")
+
+# Verify the final table
+final_df = spark.table(target_table_full)
+print("\nFinal table schema:")
+final_df.printSchema()
+print(f"\nFinal table row count: {final_df.count()}")
