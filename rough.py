@@ -6,30 +6,41 @@ delta_table_1 = f"{catalog}.{schema}.prepare_historical_data"
 embedding_table_1 = f"{catalog}.{schema}.embedding_prepare_historical_data"
 
 from databricks_langchain import DatabricksEmbeddings
-from pyspark.sql.functions import pandas_udf, col
-from pyspark.sql.types import ArrayType, FloatType
+from pyspark.sql.types import StructType, ArrayType, FloatType
 import pandas as pd
 
 # Initialize the embedding model
 embeddings = DatabricksEmbeddings(endpoint="sister_v2_small")
 
-# Pandas UDF to embed a batch of texts
-@pandas_udf(ArrayType(FloatType()))
-def embed_batch(texts: pd.Series) -> pd.Series:
-    return texts.apply(lambda t: embeddings.embed_query(t) if t is not None else None)
-
-# Load source table
+# Load source table and convert to Pandas
 df = spark.table(delta_table_1)
+pdf = df.toPandas()
 
-# Generate embeddings for both columns - use col() to reference columns
-df_with_embeddings = (
-    df
-    .withColumn("finding_embedding", embed_batch(col("Finding")))
-    .withColumn("action_embedding", embed_batch(col("Action")))
-)
+print(f"Processing {len(pdf)} rows...")
 
-# Write the result to a new table (includes original columns + embeddings)
+# Function to safely embed text
+def safe_embed(text):
+    if pd.isna(text) or text == "" or text is None:
+        return None
+    try:
+        return embeddings.embed_query(str(text))
+    except Exception as e:
+        print(f"Error embedding text: {e}")
+        return None
+
+# Generate embeddings for both columns
+pdf['finding_embedding'] = pdf['Finding'].apply(safe_embed)
+pdf['action_embedding'] = pdf['Action'].apply(safe_embed)
+
+print("Embeddings generated. Converting back to Spark DataFrame...")
+
+# Convert back to Spark DataFrame
+df_with_embeddings = spark.createDataFrame(pdf)
+
+# Write the result to a new table
 df_with_embeddings.write.mode("overwrite").saveAsTable(embedding_table_1)
+
+print("Table saved successfully!")
 
 # Show the resulting DataFrame
 display(df_with_embeddings)
