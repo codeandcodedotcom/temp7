@@ -1,102 +1,207 @@
-from pyspark.sql import functions as F
-from pyspark.sql.types import ArrayType, FloatType
-import requests
+{
+  "bands": [
+    {
+      "min_score": 1,
+      "max_score": 27,
+      "roles": []             // self-managed → no roles
+    },
+    {
+      "min_score": 28,
+      "max_score": 39,
+      "roles": ["Project Lead"]
+    },
+    {
+      "min_score": 40,
+      "max_score": 51,
+      "roles": ["Project Manager"]
+    },
+    {
+      "min_score": 52,
+      "max_score": 60,
+      "roles": [
+        "Programme Manager",
+        "Senior Project Manager",
+        "Change Manager"
+      ]
+    }
+  ]
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
 import json
+from pathlib import Path
+from typing import Any, Dict, List
+# ---------- PM role mapping support ----------
 
-# Configuration
-CATALOG = "dsenprod"
-SCHEMA = "lit_prepare"
-SOURCE_TABLE = "your_source_table_name"  # Replace with your actual table name
-TARGET_TABLE = "your_target_table_name"  # Replace with your desired target table name
-EMBEDDING_MODEL = "sister_v2_small"
+# Adjust these filenames / paths if needed
+_JOB_PROFILE_FILE = Path(__file__).with_name("job_profile_mapping.json")
+_PM_BANDS_FILE = Path(__file__).with_name("pm_role_bands.json")
 
-# Full table names
-source_table_full = f"{CATALOG}.{SCHEMA}.{SOURCE_TABLE}"
-target_table_full = f"{CATALOG}.{SCHEMA}.{TARGET_TABLE}"
-
-# Read the source table
-df = spark.table(source_table_full)
-
-print(f"Loaded {df.count()} rows from {source_table_full}")
-
-# Get Databricks token and host for API calls
-token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
-host = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiUrl().get()
-
-# Function to get embeddings from Databricks serving endpoint
-def get_embedding(text):
-    """
-    Get embedding for a single text string.
-    Returns a list of floats (the embedding vector).
-    """
-    if text is None or str(text).strip() == "":
-        return None
-    
-    url = f"{host}/serving-endpoints/{EMBEDDING_MODEL}/invocations"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-    
-    # Correct payload format based on sister_v2_small model requirements
-    payload = {
-        "inputs": [str(text)]  # Must be "inputs" (plural) with a list
-    }
-    
+def _load_json_safe(path: Path) -> Dict[str, Any]:
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
-        result = response.json()
-        
-        # Extract embedding from response - sister_v2_small returns "predictions"
-        if isinstance(result, dict) and "predictions" in result:
-            predictions = result["predictions"]
-            if isinstance(predictions, list) and len(predictions) > 0:
-                # Return the first prediction (embedding vector)
-                return predictions[0]
-        
-        print(f"Unexpected response format: {result}")
-        return None
-        
-    except Exception as e:
-        print(f"Error getting embedding: {str(e)}")
-        return None
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
-# Register UDF with proper return type
-get_embedding_udf = F.udf(get_embedding, ArrayType(FloatType()))
+_job_profiles_data = _load_json_safe(_JOB_PROFILE_FILE)
+_pm_bands_data = _load_json_safe(_PM_BANDS_FILE)
 
-# Add embedded columns
-# Cast text columns to string explicitly to avoid any type issues
-df_with_embeddings = df.withColumn(
-    "Finding_Embedding",
-    get_embedding_udf(F.col("Finding").cast("string"))
-).withColumn(
-    "Action_Embedding",
-    get_embedding_udf(F.col("Action").cast("string"))
-)
+_JOB_PROFILES: List[Dict[str, Any]] = _job_profiles_data.get("job_profile_mapping", [])
+_PM_BANDS: List[Dict[str, Any]] = _pm_bands_data.get("bands", [])
 
-# Show sample to verify
-print("\nSample of embedded data:")
-df_with_embeddings.select("Id", "Finding", "Action").show(5, truncate=50)
 
-# Check if embeddings were generated
-embedding_check = df_with_embeddings.select(
-    F.sum(F.when(F.col("Finding_Embedding").isNotNull(), 1).otherwise(0)).alias("finding_embeddings_count"),
-    F.sum(F.when(F.col("Action_Embedding").isNotNull(), 1).otherwise(0)).alias("action_embeddings_count")
-).collect()[0]
+def get_pm_profiles_for_score(total_score: int) -> List[Dict[str, Any]]:
+    """
+    Based on total_score, return a list of job-profile dicts that should
+    be shown in the PM / Resource Recommendation section.
 
-print(f"\nEmbeddings generated:")
-print(f"Finding embeddings: {embedding_check['finding_embeddings_count']}")
-print(f"Action embeddings: {embedding_check['action_embeddings_count']}")
+    - 1–27   → []  (self-managed, no roles)
+    - 28–39  → ["Project Lead"]
+    - 40–51  → ["Project Manager"]
+    - 52–60  → multiple roles (from pm_role_bands.json)
+    """
+    # Find the matching band
+    for band in _PM_BANDS:
+        try:
+            min_s = int(band.get("min_score", 0))
+            max_s = int(band.get("max_score", 0))
+        except Exception:
+            continue
 
-# Write to target table
-print(f"\nWriting to {target_table_full}...")
-df_with_embeddings.write.mode("overwrite").saveAsTable(target_table_full)
+        if min_s <= total_score <= max_s:
+            role_names = band.get("roles") or []
+            break
+    else:
+        # no band matched → default: no profiles
+        return []
 
-print(f"\nSuccess! Table {target_table_full} created with {df_with_embeddings.count()} rows.")
+    if not role_names:
+        # self-managed case
+        return []
 
-# Verify the final table
-final_df = spark.table(target_table_full)
-print("\nFinal table schema:")
-final_df.printSchema()
-print(f"\nFinal table row count: {final_df.count()}")
+    # For each role name, pick the corresponding job_profile block
+    results: List[Dict[str, Any]] = []
+    for rn in role_names:
+        for prof in _JOB_PROFILES:
+            if prof.get("job_profile") == rn:
+                results.append(prof)
+                break  # stop after first match
+
+    return results
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# compute score and scoring summary
+    total_score, budget = _compute_total_score(questions)
+    try:
+        scoring_info = scoring.interpret_score(total_score)
+    except Exception:
+        logger.exception("scoring.interpret_score failed; using fallback")
+        scoring_info = {"complexity": None, "recommendation": None, "rationale": None}
+
+    # NEW: get PM profiles based on score
+    try:
+        pm_profiles = scoring.get_pm_profiles_for_score(total_score)
+    except Exception:
+        logger.exception("get_pm_profiles_for_score failed")
+        pm_profiles = []
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+pm_reco = resp.get("pm_resource_recommendation") or []
+project_manager = resp.get("project_manager") or {}  # keep old fallback
+
+# PM / Resource Recommendation
+if isinstance(pm_reco, list) and pm_reco:
+    # pm_reco is a list of profiles (0, 1 or many)
+    pm_html_parts = []
+    for prof in pm_reco:
+        if not isinstance(prof, dict):
+            continue
+        profile_name = prof.get("job_profile") or ""
+        skills = prof.get("skills") or []
+        pm_resp = prof.get("responsibilities") or []
+        tasks = prof.get("tasks") or []
+
+        block = ""
+        if profile_name:
+            block += f"<p><strong>Recommended profile:</strong> {esc(str(profile_name))}</p>"
+
+        if skills:
+            block += "<p><strong>Skills:</strong></p><ul>"
+            for s in skills:
+                block += f"<li>{esc(str(s))}</li>"
+            block += "</ul>"
+
+        if pm_resp:
+            block += "<p><strong>Responsibilities:</strong></p><ul>"
+            for r in pm_resp:
+                block += f"<li>{esc(str(r))}</li>"
+            block += "</ul>"
+
+        if tasks:
+            block += "<p><strong>Tasks:</strong></p><ul>"
+            for t in tasks:
+                block += f"<li>{esc(str(t))}</li>"
+            block += "</ul>"
+
+        if block:
+            pm_html_parts.append(block)
+
+    pm_html = "".join(pm_html_parts) if pm_html_parts else "<p><em>Not provided</em></p>"
+
+elif isinstance(project_manager, dict) and project_manager:
+    # old behaviour fallback if pm_resource_recommendation is missing
+    pm_html = ""
+    pm_count = project_manager.get("count")
+    if pm_count is not None:
+        pm_html += f"<p><strong>Project Manager(s):</strong> {esc(str(pm_count))}</p>"
+    responsibilities = project_manager.get("responsibilities") or []
+    if responsibilities:
+        pm_html += "<p><strong>Responsibilities:</strong></p><ul>"
+        for d in responsibilities:
+            pm_html += f"<li>{esc(str(d))}</li>"
+        pm_html += "</ul>"
+else:
+    # low-complexity self-managed case (1–27) will land here with empty list → “Not provided”
+    pm_html = "<p><em>Not provided</em></p>"
